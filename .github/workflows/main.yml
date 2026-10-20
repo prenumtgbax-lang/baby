@@ -1,4 +1,4 @@
-name: Build SMSIFYHUB Android APK
+name: SMSIFYHUB Android APK Build
 
 on:
   workflow_dispatch:
@@ -19,58 +19,93 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Inspect Project Files
-        run: |
-          echo "Current directory:"
-          pwd
-          echo "Project files:"
-          ls -la
-          echo "Searching for Gradle files:"
-          find . -maxdepth 5 \
-            \( -name gradlew \
-            -o -name settings.gradle \
-            -o -name settings.gradle.kts \
-            -o -name build.gradle \
-            -o -name build.gradle.kts \
-            -o -name gradle-wrapper.properties \) \
-            -print
-
-      - name: Set Up Java
+      - name: Setup Java
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Locate Gradle Wrapper
-        id: gradle
+      - name: Install Build Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip findutils
+
+      - name: Extract Project ZIP
         shell: bash
         run: |
-          WRAPPER=$(find . -type f -name gradlew \
-            -not -path '*/.git/*' | head -n 1)
+          set -e
+
+          ZIP_FILE=$(find "$GITHUB_WORKSPACE" \
+            -type f \
+            -iname "SMSIFYHUB_Android_Project_UPDATED.zip" \
+            -not -path "*/.git/*" | head -n 1)
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: Project ZIP not found in repository."
+            echo "Upload SMSIFYHUB_Android_Project_UPDATED.zip first."
+            exit 1
+          fi
+
+          mkdir -p "$GITHUB_WORKSPACE/extracted"
+
+          unzip -oq "$ZIP_FILE" \
+            -d "$GITHUB_WORKSPACE/extracted"
+
+          echo "ZIP extracted successfully."
+          find "$GITHUB_WORKSPACE/extracted" \
+            -maxdepth 4 -type f | head -200
+
+      - name: Locate Android Project
+        id: project
+        shell: bash
+        run: |
+          set -e
+
+          ROOT="$GITHUB_WORKSPACE/extracted"
+
+          WRAPPER=$(find "$ROOT" \
+            -type f \
+            -name gradlew \
+            -not -path "*/.git/*" | head -n 1)
 
           if [ -z "$WRAPPER" ]; then
-            echo "ERROR: gradlew not found."
-            echo "Upload the extracted Android project, not just its ZIP file."
+            echo "ERROR: gradlew was not found in the extracted ZIP."
+            echo "The ZIP may not contain a complete Gradle project."
+            echo "Inspect the extracted files in the previous step."
             exit 1
           fi
 
           PROJECT_DIR=$(dirname "$WRAPPER")
-          echo "wrapper=$WRAPPER" >> "$GITHUB_OUTPUT"
-          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+
+          if [ ! -f "$PROJECT_DIR/settings.gradle" ] && \
+             [ ! -f "$PROJECT_DIR/settings.gradle.kts" ]; then
+            echo "ERROR: Gradle settings file not found beside gradlew."
+            exit 1
+          fi
 
           chmod +x "$WRAPPER"
 
+          echo "wrapper=$WRAPPER" >> "$GITHUB_OUTPUT"
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+
+          echo "Android project: $PROJECT_DIR"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
       - name: Build Debug APK
-        working-directory: ${{ steps.gradle.outputs.project_dir }}
+        shell: bash
+        working-directory: ${{ steps.project.outputs.project_dir }}
         run: |
-          $GITHUB_WORKSPACE/${{ steps.gradle.outputs.wrapper }} \
-            assembleDebug --stacktrace
+          set -e
+
+          ./gradlew assembleDebug --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: SMSIFYHUB-Android-APK
           path: |
-            **/build/outputs/apk/debug/*.apk
+            extracted/**/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 7
