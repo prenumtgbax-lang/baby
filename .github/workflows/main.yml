@@ -20,14 +20,20 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 2. Setup Java
-      - name: Setup Java 17
+      # 2. Setup Java 17
+      - name: Setup Java
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
-      # 3. Extract ZIP
+      # 3. Install unzip
+      - name: Install Required Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip
+
+      # 4. Extract Android ZIP
       - name: Extract Android Project
         shell: bash
         run: |
@@ -39,7 +45,7 @@ jobs:
             -not -path "*/.git/*" | head -n 1 || true)
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: Project ZIP not found."
+            echo "ERROR: Android project ZIP not found."
             exit 1
           fi
 
@@ -48,173 +54,92 @@ jobs:
           unzip -oq "$ZIP_FILE" \
             -d "$GITHUB_WORKSPACE/project"
 
-          echo "Project extracted successfully."
+          echo "Android project extracted."
 
-          find "$GITHUB_WORKSPACE/project" \
-            -maxdepth 4 -type f | head -150
+          test -f "$GITHUB_WORKSPACE/project/gradlew"
+          test -f "$GITHUB_WORKSPACE/project/settings.gradle.kts"
+          test -f "$GITHUB_WORKSPACE/project/app/build.gradle.kts"
 
-      # 4. Find Gradle project
-      - name: Locate Android Project
-        id: locate
+      # 5. Fix the exact Kotlin error from your log
+      - name: Fix PhoneCall Import
         shell: bash
         run: |
           set -euo pipefail
 
-          ROOT="$GITHUB_WORKSPACE/project"
+          FILE="$GITHUB_WORKSPACE/project/app/src/main/java/com/smsifyhub/app/ui/FloatingPopupView.kt"
 
-          WRAPPER=$(find "$ROOT" \
-            -type f \
-            -name gradlew \
-            -not -path "*/.git/*" | head -n 1 || true)
-
-          if [ -z "$WRAPPER" ]; then
-            echo "ERROR: gradlew not found."
+          if [ ! -f "$FILE" ]; then
+            echo "ERROR: FloatingPopupView.kt not found."
             exit 1
           fi
 
-          PROJECT_DIR="$(dirname "$WRAPPER")"
+          sed -i \
+            '/^import androidx\.compose\.material\.icons\.filled\.PhoneCall$/d' \
+            "$FILE"
 
-          if [ ! -f "$PROJECT_DIR/settings.gradle" ] && \
-             [ ! -f "$PROJECT_DIR/settings.gradle.kts" ]; then
-            echo "ERROR: settings.gradle or settings.gradle.kts missing."
+          echo "Checking PhoneCall import..."
+
+          if grep -n 'import androidx.compose.material.icons.filled.PhoneCall' "$FILE"; then
+            echo "ERROR: PhoneCall import still exists."
             exit 1
+          else
+            echo "PhoneCall import fixed."
           fi
 
-          if [ ! -f "$PROJECT_DIR/gradle/wrapper/gradle-wrapper.properties" ]; then
-            echo "ERROR: Gradle wrapper properties missing."
-            exit 1
-          fi
-
-          chmod +x "$WRAPPER"
-
-          echo "dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
-
-          echo "Gradle project: $PROJECT_DIR"
-
-      # 5. Setup Android SDK
+      # 6. Setup Android SDK
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
-        with:
-          packages: ''
 
-      # 6. Accept Android licenses
-      - name: Accept Android SDK Licenses
-        shell: bash
-        run: |
-          set -e
-
-          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" \
-            -type f -name sdkmanager | head -n 1)
-
-          yes | "$SDKMANAGER" --licenses || true
-
-      # 7. Detect compileSdk
-      - name: Detect Android SDK Version
-        id: sdk
-        working-directory: ${{ steps.locate.outputs.dir }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          FILE=""
-
-          if [ -f app/build.gradle ]; then
-            FILE="app/build.gradle"
-          elif [ -f app/build.gradle.kts ]; then
-            FILE="app/build.gradle.kts"
-          fi
-
-          if [ -z "$FILE" ]; then
-            echo "ERROR: app/build.gradle not found."
-            exit 1
-          fi
-
-          SDK=$(grep -E 'compileSdk(Version)?[[:space:]=]+[0-9]+' \
-            "$FILE" | grep -oE '[0-9]+' | head -n 1 || true)
-
-          if [ -z "$SDK" ]; then
-            echo "ERROR: Cannot detect compileSdk."
-            echo "Check app/build.gradle manually."
-            exit 1
-          fi
-
-          echo "api=$SDK" >> "$GITHUB_OUTPUT"
-
-          echo "Detected compileSdk: $SDK"
-
-      # 8. Install Android SDK
+      # 7. Install Android SDK packages
       - name: Install Android SDK Packages
         shell: bash
         run: |
           set -euo pipefail
 
           SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" \
-            -type f -name sdkmanager | head -n 1)
+            -type f -name sdkmanager | head -n 1 || true)
 
-          yes | "$SDKMANAGER" --licenses || true
+          if [ -z "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager not found."
+            exit 1
+          fi
+
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
 
           "$SDKMANAGER" \
             "platform-tools" \
-            "platforms;android-${{ steps.sdk.outputs.api }}"
+            "platforms;android-35" \
+            "build-tools;35.0.0"
 
-      # 9. Check Gradle and Java
-      - name: Check Build Environment
-        working-directory: ${{ steps.locate.outputs.dir }}
+      # 8. Verify Java and Gradle
+      - name: Verify Build Environment
+        working-directory: project
         shell: bash
         run: |
+          set -euo pipefail
+
+          chmod +x gradlew
+
           java -version
           ./gradlew --version
 
-      # 10. Compile Kotlin and capture detailed errors
-      - name: Compile Kotlin
-        id: kotlin
-        working-directory: ${{ steps.locate.outputs.dir }}
-        shell: bash
-        run: |
-          set +e
-
-          ./gradlew \
-            --no-daemon \
-            :app:compileDebugKotlin \
-            --stacktrace \
-            --info 2>&1 | tee "$GITHUB_WORKSPACE/kotlin-error.log"
-
-          RESULT=${PIPESTATUS[0]}
-
-          echo "===== KOTLIN COMPILATION ERRORS ====="
-
-          grep -n -B 5 -A 8 -E \
-            'e: file:|error:|Unresolved reference|Type mismatch|Compilation error|What went wrong' \
-            "$GITHUB_WORKSPACE/kotlin-error.log" || true
-
-          exit "$RESULT"
-
-      # 11. Build APK
+      # 9. Build Debug APK
       - name: Build Debug APK
-        working-directory: ${{ steps.locate.outputs.dir }}
+        working-directory: project
         shell: bash
         run: |
+          set -euo pipefail
+
           ./gradlew \
             --no-daemon \
-            assembleDebug \
+            :app:assembleDebug \
             --stacktrace
 
-      # 12. Upload APK
-      - name: Upload APK Artifact
-        if: success()
+      # 10. Upload APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: SMSIFYHUB-Android-APK
-          path: project/**/build/outputs/apk/debug/*.apk
+          path: project/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
-          retention-days: 7
-
-      # 13. Upload error log if build fails
-      - name: Upload Kotlin Error Log
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: SMSIFYHUB-Build-Error-Log
-          path: kotlin-error.log
-          if-no-files-found: ignore
           retention-days: 7
