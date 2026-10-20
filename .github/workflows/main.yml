@@ -1,4 +1,4 @@
-name: SMSIFYHUB Android APK Build
+name: SMSIFYHUB Android APK
 
 on:
   workflow_dispatch:
@@ -12,7 +12,6 @@ permissions:
 
 jobs:
   build:
-    name: Build Android APK
     runs-on: ubuntu-latest
 
     steps:
@@ -25,93 +24,122 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Extract Android Project
+      - name: Find and Extract Project ZIP
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          ZIP_FILE=$(find "$GITHUB_WORKSPACE" \
-            -type f \
-            -iname "SMSIFYHUB_Android_Project_UPDATED.zip" \
-            -not -path "*/.git/*" | head -n 1)
+          ZIP=$(find . -type f \
+            -iname 'SMSIFYHUB_Android_Project_UPDATED.zip' \
+            -not -path '*/.git/*' | head -n 1)
 
-          if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: Android project ZIP not found."
+          if [ -z "$ZIP" ]; then
+            echo "ERROR: ZIP file not found."
             exit 1
           fi
 
-          mkdir -p "$GITHUB_WORKSPACE/extracted"
-          unzip -oq "$ZIP_FILE" -d "$GITHUB_WORKSPACE/extracted"
+          mkdir -p "$GITHUB_WORKSPACE/project"
+          unzip -oq "$ZIP" -d "$GITHUB_WORKSPACE/project"
 
-          echo "Extracted project files:"
-          find "$GITHUB_WORKSPACE/extracted" \
-            -maxdepth 3 -type f | head -100
+          echo "Extracted files:"
+          find "$GITHUB_WORKSPACE/project" \
+            -maxdepth 4 -type f | head -150
 
       - name: Locate Gradle Project
-        id: project
+        id: locate
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          ROOT="$GITHUB_WORKSPACE/extracted"
+          ROOT="$GITHUB_WORKSPACE/project"
 
           WRAPPER=$(find "$ROOT" -type f -name gradlew \
-            -not -path "*/.git/*" | head -n 1 || true)
+            -not -path '*/.git/*' | head -n 1 || true)
 
           if [ -z "$WRAPPER" ]; then
-            echo "ERROR: gradlew not found in ZIP."
+            echo "ERROR: gradlew missing from ZIP."
             exit 1
           fi
 
-          PROJECT_DIR="$(dirname "$WRAPPER")"
+          DIR="$(dirname "$WRAPPER")"
 
-          if [ ! -f "$PROJECT_DIR/settings.gradle" ] && \
-             [ ! -f "$PROJECT_DIR/settings.gradle.kts" ]; then
-            echo "ERROR: settings.gradle not found."
+          if [ ! -f "$DIR/settings.gradle" ] && \
+             [ ! -f "$DIR/settings.gradle.kts" ]; then
+            echo "ERROR: Gradle settings file missing."
             exit 1
           fi
 
           chmod +x "$WRAPPER"
 
-          echo "dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
 
-      - name: Setup Android SDK
+      - name: Configure Android SDK
         uses: android-actions/setup-android@v3
         with:
           packages: ''
 
-      - name: Install Android SDK Packages
+      - name: Accept Android SDK Licenses
         shell: bash
         run: |
-          set -euo pipefail
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" \
+            -type f -name sdkmanager | head -n 1)
 
-          SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses || true
 
-          if [ ! -f "$SDKMANAGER" ]; then
-            SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" \
-              -type f -name sdkmanager | head -n 1 || true)
+      - name: Detect Required Android SDK
+        id: sdk
+        working-directory: ${{ steps.locate.outputs.dir }}
+        shell: bash
+        run: |
+          set -e
+
+          FILE=""
+          if [ -f app/build.gradle ]; then
+            FILE="app/build.gradle"
+          elif [ -f app/build.gradle.kts ]; then
+            FILE="app/build.gradle.kts"
           fi
 
-          if [ -z "$SDKMANAGER" ] || [ ! -f "$SDKMANAGER" ]; then
-            echo "ERROR: sdkmanager not found."
+          if [ -z "$FILE" ]; then
+            echo "ERROR: app/build.gradle not found."
             exit 1
           fi
 
-          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          SDK=$(grep -E 'compileSdk(Version)?[[:space:]=]+[0-9]+' \
+            "$FILE" | grep -oE '[0-9]+' | head -n 1 || true)
 
-          "$SDKMANAGER" "platform-tools"
+          if [ -z "$SDK" ]; then
+            echo "ERROR: Could not detect compileSdk."
+            echo "Check app/build.gradle manually."
+            exit 1
+          fi
 
-      - name: Build Debug APK
-        working-directory: ${{ steps.project.outputs.dir }}
+          echo "api=$SDK" >> "$GITHUB_OUTPUT"
+          echo "Detected compileSdk: $SDK"
+
+      - name: Install Required Android SDK
         shell: bash
         run: |
-          set -euo pipefail
-          ./gradlew assembleDebug --stacktrace
+          set -e
+
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" \
+            -type f -name sdkmanager | head -n 1)
+
+          "$SDKMANAGER" \
+            "platform-tools" \
+            "platforms;android-${{ steps.sdk.outputs.api }}"
+
+      - name: Build Debug APK
+        working-directory: ${{ steps.locate.outputs.dir }}
+        shell: bash
+        run: |
+          set -e
+          ./gradlew --no-daemon assembleDebug --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: SMSIFYHUB-Android-APK
-          path: extracted/**/build/outputs/apk/debug/*.apk
+          path: project/**/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 7
