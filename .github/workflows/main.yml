@@ -25,15 +25,10 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Install Build Tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y unzip findutils
-
-      - name: Extract Project ZIP
+      - name: Extract Android Project
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           ZIP_FILE=$(find "$GITHUB_WORKSPACE" \
             -type f \
@@ -41,71 +36,82 @@ jobs:
             -not -path "*/.git/*" | head -n 1)
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: Project ZIP not found in repository."
-            echo "Upload SMSIFYHUB_Android_Project_UPDATED.zip first."
+            echo "ERROR: Android project ZIP not found."
             exit 1
           fi
 
           mkdir -p "$GITHUB_WORKSPACE/extracted"
+          unzip -oq "$ZIP_FILE" -d "$GITHUB_WORKSPACE/extracted"
 
-          unzip -oq "$ZIP_FILE" \
-            -d "$GITHUB_WORKSPACE/extracted"
-
-          echo "ZIP extracted successfully."
+          echo "Extracted project files:"
           find "$GITHUB_WORKSPACE/extracted" \
-            -maxdepth 4 -type f | head -200
+            -maxdepth 3 -type f | head -100
 
-      - name: Locate Android Project
+      - name: Locate Gradle Project
         id: project
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           ROOT="$GITHUB_WORKSPACE/extracted"
 
-          WRAPPER=$(find "$ROOT" \
-            -type f \
-            -name gradlew \
-            -not -path "*/.git/*" | head -n 1)
+          WRAPPER=$(find "$ROOT" -type f -name gradlew \
+            -not -path "*/.git/*" | head -n 1 || true)
 
           if [ -z "$WRAPPER" ]; then
-            echo "ERROR: gradlew was not found in the extracted ZIP."
-            echo "The ZIP may not contain a complete Gradle project."
-            echo "Inspect the extracted files in the previous step."
+            echo "ERROR: gradlew not found in ZIP."
             exit 1
           fi
 
-          PROJECT_DIR=$(dirname "$WRAPPER")
+          PROJECT_DIR="$(dirname "$WRAPPER")"
 
           if [ ! -f "$PROJECT_DIR/settings.gradle" ] && \
              [ ! -f "$PROJECT_DIR/settings.gradle.kts" ]; then
-            echo "ERROR: Gradle settings file not found beside gradlew."
+            echo "ERROR: settings.gradle not found."
             exit 1
           fi
 
           chmod +x "$WRAPPER"
 
-          echo "wrapper=$WRAPPER" >> "$GITHUB_OUTPUT"
-          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
-
-          echo "Android project: $PROJECT_DIR"
+          echo "dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: ''
+
+      - name: Install Android SDK Packages
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+
+          if [ ! -f "$SDKMANAGER" ]; then
+            SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" \
+              -type f -name sdkmanager | head -n 1 || true)
+          fi
+
+          if [ -z "$SDKMANAGER" ] || [ ! -f "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager not found."
+            exit 1
+          fi
+
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+
+          "$SDKMANAGER" "platform-tools"
 
       - name: Build Debug APK
+        working-directory: ${{ steps.project.outputs.dir }}
         shell: bash
-        working-directory: ${{ steps.project.outputs.project_dir }}
         run: |
-          set -e
-
+          set -euo pipefail
           ./gradlew assembleDebug --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: SMSIFYHUB-Android-APK
-          path: |
-            extracted/**/build/outputs/apk/debug/*.apk
+          path: extracted/**/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 7
