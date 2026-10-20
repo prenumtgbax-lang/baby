@@ -15,25 +15,25 @@ jobs:
     name: Build SMSIFYHUB APK
     runs-on: ubuntu-latest
 
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+
     steps:
-      # 1. Checkout repository
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 2. Setup Java 17
-      - name: Setup Java
+      - name: Setup Java 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
-      # 3. Install unzip
-      - name: Install Required Tools
+      - name: Install Utilities
         run: |
           sudo apt-get update
           sudo apt-get install -y unzip
 
-      # 4. Extract Android ZIP
       - name: Extract Android Project
         shell: bash
         run: |
@@ -54,19 +54,18 @@ jobs:
           unzip -oq "$ZIP_FILE" \
             -d "$GITHUB_WORKSPACE/project"
 
-          echo "Android project extracted."
+          test -f project/gradlew
+          test -f project/settings.gradle.kts
+          test -f project/app/build.gradle.kts
 
-          test -f "$GITHUB_WORKSPACE/project/gradlew"
-          test -f "$GITHUB_WORKSPACE/project/settings.gradle.kts"
-          test -f "$GITHUB_WORKSPACE/project/app/build.gradle.kts"
+          echo "Project extracted successfully."
 
-      # 5. Fix the exact Kotlin error from your log
       - name: Fix PhoneCall Import
         shell: bash
         run: |
           set -euo pipefail
 
-          FILE="$GITHUB_WORKSPACE/project/app/src/main/java/com/smsifyhub/app/ui/FloatingPopupView.kt"
+          FILE="project/app/src/main/java/com/smsifyhub/app/ui/FloatingPopupView.kt"
 
           if [ ! -f "$FILE" ]; then
             echo "ERROR: FloatingPopupView.kt not found."
@@ -77,21 +76,10 @@ jobs:
             '/^import androidx\.compose\.material\.icons\.filled\.PhoneCall$/d' \
             "$FILE"
 
-          echo "Checking PhoneCall import..."
+          echo "Invalid PhoneCall import removed."
 
-          if grep -n 'import androidx.compose.material.icons.filled.PhoneCall' "$FILE"; then
-            echo "ERROR: PhoneCall import still exists."
-            exit 1
-          else
-            echo "PhoneCall import fixed."
-          fi
-
-      # 6. Setup Android SDK
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      # 7. Install Android SDK packages
-      - name: Install Android SDK Packages
+      - name: Locate Android SDK Manager
+        id: sdk
         shell: bash
         run: |
           set -euo pipefail
@@ -104,15 +92,26 @@ jobs:
             exit 1
           fi
 
-          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          echo "path=$SDKMANAGER" >> "$GITHUB_OUTPUT"
+
+          "$SDKMANAGER" --version
+
+      - name: Install Android SDK Packages
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDKMANAGER="${{ steps.sdk.outputs.path }}"
+
+          yes | "$SDKMANAGER" --licenses \
+            >/dev/null 2>&1 || true
 
           "$SDKMANAGER" \
             "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.0"
 
-      # 8. Verify Java and Gradle
-      - name: Verify Build Environment
+      - name: Verify Environment
         working-directory: project
         shell: bash
         run: |
@@ -123,7 +122,6 @@ jobs:
           java -version
           ./gradlew --version
 
-      # 9. Build Debug APK
       - name: Build Debug APK
         working-directory: project
         shell: bash
@@ -132,14 +130,26 @@ jobs:
 
           ./gradlew \
             --no-daemon \
-            :app:assembleDebug \
+            clean \
+            assembleDebug \
             --stacktrace
 
-      # 10. Upload APK
       - name: Upload APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: SMSIFYHUB-Android-APK
           path: project/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload Build Error Logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SMSIFYHUB-Build-Error-Log
+          path: |
+            project/app/build/reports/
+            project/app/build/outputs/logs/
+          if-no-files-found: ignore
           retention-days: 7
