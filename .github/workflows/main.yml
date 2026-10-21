@@ -20,54 +20,57 @@ jobs:
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
 
     steps:
+      # 1. Checkout Repository
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      # 2. Setup Java 17
       - name: Setup Java 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
+          cache: gradle
 
+      # 3. Install Utilities
       - name: Install Utilities
         run: |
           sudo apt-get update
           sudo apt-get install -y unzip
 
+      # 4. Extract Android Project
       - name: Extract Android Project
         shell: bash
         run: |
           set -euo pipefail
 
-          ZIP_FILE="$GITHUB_WORKSPACE/SMSIFYHUB_Android_Project_COMPLETED (1).zip"
+          ZIP_FILE=$(find "$GITHUB_WORKSPACE" \
+            -type f \
+            -name "SMSIFYHUB_Android_Project_COMPLETED (1).zip" \
+            -not -path "*/.git/*" | head -n 1 || true)
 
-          if [ ! -f "$ZIP_FILE" ]; then
-            ZIP_FILE=$(find "$GITHUB_WORKSPACE" \
-              -type f \
-              -name "SMSIFYHUB_Android_Project_COMPLETED (1).zip" \
-              -not -path "*/.git/*" | head -n 1 || true)
-          fi
-
-          if [ -z "${ZIP_FILE:-}" ] || [ ! -f "$ZIP_FILE" ]; then
+          if [ -z "$ZIP_FILE" ]; then
             echo "ERROR: Android project ZIP not found."
             exit 1
           fi
+
+          echo "Found ZIP: $ZIP_FILE"
 
           mkdir -p "$GITHUB_WORKSPACE/extracted"
 
           unzip -oq "$ZIP_FILE" \
             -d "$GITHUB_WORKSPACE/extracted"
 
-          echo "Extracted ZIP contents:"
-          find "$GITHUB_WORKSPACE/extracted" \
-            -maxdepth 4 -type f | head -n 100
+          echo "Searching for Android project..."
 
           GRADLEW=$(find "$GITHUB_WORKSPACE/extracted" \
             -type f -name gradlew | head -n 1 || true)
 
           if [ -z "$GRADLEW" ]; then
-            echo "ERROR: gradlew was not found anywhere in the ZIP."
-            echo "The ZIP may contain incomplete source files."
+            echo "ERROR: gradlew not found inside ZIP."
+            echo "ZIP contents:"
+            find "$GITHUB_WORKSPACE/extracted" \
+              -maxdepth 4 -type f | head -n 100
             exit 1
           fi
 
@@ -75,22 +78,21 @@ jobs:
 
           if [ ! -f "$PROJECT_DIR/settings.gradle.kts" ] && \
              [ ! -f "$PROJECT_DIR/settings.gradle" ]; then
-            echo "ERROR: Gradle settings file not found beside gradlew."
-            echo "Detected directory: $PROJECT_DIR"
+            echo "ERROR: Gradle settings file not found."
             exit 1
           fi
 
           if [ ! -f "$PROJECT_DIR/app/build.gradle.kts" ] && \
              [ ! -f "$PROJECT_DIR/app/build.gradle" ]; then
-            echo "ERROR: App Gradle file not found."
-            echo "Detected directory: $PROJECT_DIR"
+            echo "ERROR: App Gradle build file not found."
             exit 1
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Android project found at: $PROJECT_DIR"
+          echo "Android project found: $PROJECT_DIR"
 
+      # 5. Fix PhoneCall Import
       - name: Fix PhoneCall Import
         shell: bash
         run: |
@@ -105,9 +107,25 @@ jobs:
 
             echo "PhoneCall import check completed."
           else
-            echo "FloatingPopupView.kt not found; skipping optional fix."
+            echo "FloatingPopupView.kt not found; skipping import fix."
           fi
 
+      # 6. Verify Java 17
+      - name: Verify Java 17
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "JAVA_HOME=$JAVA_HOME"
+
+          java -version
+
+          if [[ "$(java -version 2>&1)" != *'17.'* ]]; then
+            echo "ERROR: Java 17 is required."
+            exit 1
+          fi
+
+      # 7. Locate Android SDK Manager
       - name: Locate Android SDK Manager
         id: sdk
         shell: bash
@@ -126,6 +144,7 @@ jobs:
 
           "$SDKMANAGER" --version
 
+      # 8. Install Android SDK Packages
       - name: Install Android SDK Packages
         shell: bash
         run: |
@@ -141,7 +160,8 @@ jobs:
             "platforms;android-35" \
             "build-tools;35.0.0"
 
-      - name: Verify Environment
+      # 9. Verify Gradle
+      - name: Verify Gradle
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
@@ -149,21 +169,27 @@ jobs:
 
           chmod +x gradlew
 
+          echo "Java version:"
           java -version
+
+          echo "Gradle version:"
           ./gradlew --version
 
+      # 10. Build Debug APK
       - name: Build Debug APK
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
-          set -euo pipefail
+          set -o pipefail
 
           ./gradlew \
             --no-daemon \
             clean \
             assembleDebug \
-            --stacktrace
+            --stacktrace \
+            --info 2>&1 | tee "$GITHUB_WORKSPACE/build-error.log"
 
+      # 11. Upload APK
       - name: Upload APK
         if: success()
         uses: actions/upload-artifact@v4
@@ -173,13 +199,15 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      # 12. Upload Build Error Logs
       - name: Upload Build Error Logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: SMSIFYHUB-Build-Error-Log
           path: |
-            **/build/reports/
-            **/build/outputs/logs/
+            build-error.log
+            extracted/**/build/reports/**
+            extracted/**/build/outputs/logs/**
           if-no-files-found: ignore
           retention-days: 7
