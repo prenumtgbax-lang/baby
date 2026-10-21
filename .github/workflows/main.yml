@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: smsifyhub-android-build-${{ github.ref }}
+  group: smsifyhub-build-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -39,13 +39,12 @@ jobs:
 
       # 3. Install unzip
       - name: Install Utilities
-        shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y unzip
 
-      # 4. Verify ZIP and extract project
+      # 4. Extract Android project
       - name: Extract Android Project
         shell: bash
         run: |
@@ -62,9 +61,7 @@ jobs:
           fi
 
           if [ -z "${ZIP_FILE:-}" ] || [ ! -f "$ZIP_FILE" ]; then
-            echo "::error::Project ZIP was not found."
-            echo "Repository files:"
-            find "$GITHUB_WORKSPACE" -maxdepth 3 -type f | head -150
+            echo "::error::Android project ZIP not found."
             exit 1
           fi
 
@@ -72,78 +69,118 @@ jobs:
 
           mkdir -p "$GITHUB_WORKSPACE/extracted"
 
-          unzip -oq "$ZIP_FILE" -d "$GITHUB_WORKSPACE/extracted"
+          unzip -oq "$ZIP_FILE" \
+            -d "$GITHUB_WORKSPACE/extracted"
 
-          echo "Extracted project files:"
-          find "$GITHUB_WORKSPACE/extracted" \
-            -maxdepth 4 \
-            -type f \
-            \( -name 'settings.gradle' \
-            -o -name 'settings.gradle.kts' \
-            -o -name 'gradlew' \
-            -o -name 'build.gradle' \
-            -o -name 'build.gradle.kts' \) \
-            -print
+          PROJECT_DIR="$GITHUB_WORKSPACE/extracted/android_project"
 
-          # Find a Gradle wrapper whose directory contains settings.gradle
-          PROJECT_DIR=""
-
-          while IFS= read -r GRADLEW; do
-            CANDIDATE="$(dirname "$GRADLEW")"
-
-            if [ -f "$CANDIDATE/settings.gradle" ] || \
-               [ -f "$CANDIDATE/settings.gradle.kts" ]; then
-              PROJECT_DIR="$CANDIDATE"
-              break
-            fi
-          done < <(
+          if [ ! -f "$PROJECT_DIR/gradlew" ]; then
+            echo "::error::gradlew not found."
             find "$GITHUB_WORKSPACE/extracted" \
-              -type f -name gradlew -print
-          )
-
-          if [ -z "$PROJECT_DIR" ]; then
-            echo "::error::Could not find gradlew and settings.gradle in the same project directory."
-            echo "ZIP file listing:"
-            find "$GITHUB_WORKSPACE/extracted" \
-              -maxdepth 6 -type f | head -200
+              -maxdepth 5 -type f -name gradlew
             exit 1
           fi
 
-          if [ ! -f "$PROJECT_DIR/app/build.gradle" ] && \
-             [ ! -f "$PROJECT_DIR/app/build.gradle.kts" ]; then
-            echo "::error::app/build.gradle or app/build.gradle.kts was not found."
-            echo "Project directory: $PROJECT_DIR"
-            find "$PROJECT_DIR" -maxdepth 3 -type f | head -150
+          if [ ! -f "$PROJECT_DIR/settings.gradle.kts" ] && \
+             [ ! -f "$PROJECT_DIR/settings.gradle" ]; then
+            echo "::error::Gradle settings file not found."
+            exit 1
+          fi
+
+          if [ ! -f "$PROJECT_DIR/app/build.gradle.kts" ] && \
+             [ ! -f "$PROJECT_DIR/app/build.gradle" ]; then
+            echo "::error::App Gradle build file not found."
             exit 1
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Android project: $PROJECT_DIR"
+          echo "Project directory: $PROJECT_DIR"
 
-      # 5. Verify Java and Android SDK
+      # 5. Fix verified Kotlin errors and SDK path
+      - name: Fix Kotlin Errors and SDK Path
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          root = Path.cwd()
+
+          # Fix FloatingWindowService.kt
+          service = root / "app/src/main/java/com/smsifyhub/app/service/FloatingWindowService.kt"
+
+          if not service.is_file():
+              raise SystemExit(f"Missing source file: {service}")
+
+          text = service.read_text(encoding="utf-8")
+
+          old = "flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP"
+          new = "addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)"
+
+          if old in text:
+              text = text.replace(old, new, 1)
+              service.write_text(text, encoding="utf-8")
+              print("Fixed Intent flags assignment.")
+          elif new in text:
+              print("Intent flags assignment already fixed.")
+          else:
+              raise SystemExit(
+                  "Expected Intent flags code not found; refusing to modify unknown code."
+              )
+
+          # Fix AuthScreen.kt
+          auth = root / "app/src/main/java/com/smsifyhub/app/ui/AuthScreen.kt"
+
+          if not auth.is_file():
+              raise SystemExit(f"Missing source file: {auth}")
+
+          text = auth.read_text(encoding="utf-8")
+          import_line = "import androidx.compose.foundation.BorderStroke"
+
+          if import_line not in text:
+              package_line = "package com.smsifyhub.app.ui"
+              if package_line not in text:
+                  raise SystemExit("AuthScreen.kt package declaration not found.")
+
+              text = text.replace(
+                  package_line,
+                  package_line + "\n\n" + import_line,
+                  1
+              )
+              auth.write_text(text, encoding="utf-8")
+              print("Added BorderStroke import.")
+          else:
+              print("BorderStroke import already exists.")
+
+          # Replace the machine-specific SDK path with the runner SDK path.
+          local_properties = root / "local.properties"
+          local_properties.write_text(
+              "sdk.dir=" + str(Path("/usr/local/lib/android/sdk")) + "\n",
+              encoding="utf-8"
+          )
+
+          print("Updated local.properties SDK path.")
+          PY
+
+          echo "Kotlin and SDK corrections completed."
+
+      # 6. Verify Java and SDK
       - name: Verify Build Environment
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Java:"
           java -version
 
-          echo "Java home: $JAVA_HOME"
-          echo "Android SDK: $ANDROID_HOME"
+          test -d "$ANDROID_HOME"
+          test -d "$ANDROID_HOME/cmdline-tools"
 
-          if [ ! -d "$ANDROID_HOME" ]; then
-            echo "::error::Android SDK directory not found."
-            exit 1
-          fi
+          echo "Java and Android SDK directories verified."
 
-          if [ ! -d "$ANDROID_HOME/cmdline-tools" ]; then
-            echo "::error::Android SDK command-line tools not found."
-            exit 1
-          fi
-
-      # 6. Locate SDK Manager
+      # 7. Locate Android SDK Manager
       - name: Locate Android SDK Manager
         id: sdk
         shell: bash
@@ -154,14 +191,13 @@ jobs:
             -type f -name sdkmanager -print -quit)"
 
           if [ -z "$SDKMANAGER" ]; then
-            echo "::error::sdkmanager not found."
+            echo "::error::Android SDK Manager not found."
             exit 1
           fi
 
           echo "path=$SDKMANAGER" >> "$GITHUB_OUTPUT"
-          echo "SDK Manager: $SDKMANAGER"
 
-      # 7. Install SDK packages
+      # 8. Install required Android SDK packages
       - name: Install Android SDK Packages
         shell: bash
         run: |
@@ -176,8 +212,8 @@ jobs:
             "platforms;android-35" \
             "build-tools;35.0.0"
 
-      # 8. Make Gradle wrapper executable
-      - name: Prepare Gradle
+      # 9. Verify Gradle
+      - name: Verify Gradle
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
@@ -185,10 +221,9 @@ jobs:
 
           chmod +x gradlew
 
-          echo "Gradle wrapper:"
           ./gradlew --version
 
-      # 9. Build Debug APK
+      # 10. Build APK
       - name: Build Debug APK
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
@@ -196,25 +231,25 @@ jobs:
           set -uo pipefail
 
           set +e
+
           ./gradlew \
             --no-daemon \
-            --stacktrace \
-            --warning-mode all \
             clean \
             assembleDebug \
+            --stacktrace \
             2>&1 | tee "$GITHUB_WORKSPACE/build-error.log"
 
           BUILD_STATUS=${PIPESTATUS[0]}
+
           set -e
 
           if [ "$BUILD_STATUS" -ne 0 ]; then
-            echo "::error::Gradle build failed. Check build-error.log for the actual error."
+            echo "::error::Android build failed. Check the Kotlin or Gradle errors above."
             exit "$BUILD_STATUS"
           fi
 
-      # 10. Verify APK
+      # 11. Verify APK exists
       - name: Verify APK
-        if: success()
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
@@ -222,20 +257,17 @@ jobs:
 
           APK_DIR="app/build/outputs/apk/debug"
 
-          if [ ! -d "$APK_DIR" ]; then
-            echo "::error::APK output directory was not created."
-            exit 1
-          fi
-
-          find "$APK_DIR" -maxdepth 1 -type f -name '*.apk' -print
-
-          if ! find "$APK_DIR" -maxdepth 1 -type f -name '*.apk' \
+          if ! find "$APK_DIR" \
+            -maxdepth 1 -type f -name '*.apk' \
             -print -quit | grep -q .; then
-            echo "::error::No debug APK was generated."
+            echo "::error::APK file was not generated."
             exit 1
           fi
 
-      # 11. Upload APK artifact
+          echo "APK generated successfully:"
+          find "$APK_DIR" -maxdepth 1 -type f -name '*.apk'
+
+      # 12. Upload APK
       - name: Upload APK
         if: success()
         uses: actions/upload-artifact@v4
@@ -245,7 +277,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      # 12. Upload logs if build fails
+      # 13. Upload error logs if failed
       - name: Upload Build Error Logs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -253,7 +285,7 @@ jobs:
           name: SMSIFYHUB-Build-Error-Log
           path: |
             build-error.log
-            extracted/**/build/reports/**
-            extracted/**/build/outputs/logs/**
+            extracted/android_project/app/build/reports/**
+            extracted/android_project/app/build/outputs/logs/**
           if-no-files-found: ignore
           retention-days: 7
