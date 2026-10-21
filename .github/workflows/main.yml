@@ -39,58 +39,74 @@ jobs:
         run: |
           set -euo pipefail
 
-          ZIP_FILE=$(find "$GITHUB_WORKSPACE" \
-            -type f \
-            -name "SMSIFYHUB_Android_Project_COMPLETED (1).zip" \
-            -not -path "*/.git/*" | head -n 1 || true)
+          ZIP_FILE="$GITHUB_WORKSPACE/SMSIFYHUB_Android_Project_COMPLETED (1).zip"
 
-          if [ -z "$ZIP_FILE" ]; then
+          if [ ! -f "$ZIP_FILE" ]; then
+            ZIP_FILE=$(find "$GITHUB_WORKSPACE" \
+              -type f \
+              -name "SMSIFYHUB_Android_Project_COMPLETED (1).zip" \
+              -not -path "*/.git/*" | head -n 1 || true)
+          fi
+
+          if [ -z "${ZIP_FILE:-}" ] || [ ! -f "$ZIP_FILE" ]; then
             echo "ERROR: Android project ZIP not found."
-            echo "Expected file: SMSIFYHUB_Android_Project_COMPLETED (1).zip"
             exit 1
           fi
 
-          echo "Found ZIP: $ZIP_FILE"
-
-          mkdir -p "$GITHUB_WORKSPACE/project"
+          mkdir -p "$GITHUB_WORKSPACE/extracted"
 
           unzip -oq "$ZIP_FILE" \
-            -d "$GITHUB_WORKSPACE/project"
+            -d "$GITHUB_WORKSPACE/extracted"
 
-          if [ ! -f project/gradlew ]; then
-            echo "ERROR: gradlew not found in project root."
+          echo "Extracted ZIP contents:"
+          find "$GITHUB_WORKSPACE/extracted" \
+            -maxdepth 4 -type f | head -n 100
+
+          GRADLEW=$(find "$GITHUB_WORKSPACE/extracted" \
+            -type f -name gradlew | head -n 1 || true)
+
+          if [ -z "$GRADLEW" ]; then
+            echo "ERROR: gradlew was not found anywhere in the ZIP."
+            echo "The ZIP may contain incomplete source files."
             exit 1
           fi
 
-          if [ ! -f project/settings.gradle.kts ]; then
-            echo "ERROR: settings.gradle.kts not found."
+          PROJECT_DIR="$(dirname "$GRADLEW")"
+
+          if [ ! -f "$PROJECT_DIR/settings.gradle.kts" ] && \
+             [ ! -f "$PROJECT_DIR/settings.gradle" ]; then
+            echo "ERROR: Gradle settings file not found beside gradlew."
+            echo "Detected directory: $PROJECT_DIR"
             exit 1
           fi
 
-          if [ ! -f project/app/build.gradle.kts ]; then
-            echo "ERROR: app/build.gradle.kts not found."
+          if [ ! -f "$PROJECT_DIR/app/build.gradle.kts" ] && \
+             [ ! -f "$PROJECT_DIR/app/build.gradle" ]; then
+            echo "ERROR: App Gradle file not found."
+            echo "Detected directory: $PROJECT_DIR"
             exit 1
           fi
 
-          echo "Project extracted successfully."
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo "Android project found at: $PROJECT_DIR"
 
       - name: Fix PhoneCall Import
         shell: bash
         run: |
           set -euo pipefail
 
-          FILE="project/app/src/main/java/com/smsifyhub/app/ui/FloatingPopupView.kt"
+          FILE="$PROJECT_DIR/app/src/main/java/com/smsifyhub/app/ui/FloatingPopupView.kt"
 
-          if [ ! -f "$FILE" ]; then
-            echo "ERROR: FloatingPopupView.kt not found."
-            exit 1
+          if [ -f "$FILE" ]; then
+            sed -i \
+              '/^import androidx\.compose\.material\.icons\.filled\.PhoneCall$/d' \
+              "$FILE"
+
+            echo "PhoneCall import check completed."
+          else
+            echo "FloatingPopupView.kt not found; skipping optional fix."
           fi
-
-          sed -i \
-            '/^import androidx\.compose\.material\.icons\.filled\.PhoneCall$/d' \
-            "$FILE"
-
-          echo "PhoneCall import check completed."
 
       - name: Locate Android SDK Manager
         id: sdk
@@ -99,8 +115,7 @@ jobs:
           set -euo pipefail
 
           SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" \
-            -type f \
-            -name sdkmanager | head -n 1 || true)
+            -type f -name sdkmanager | head -n 1 || true)
 
           if [ -z "$SDKMANAGER" ]; then
             echo "ERROR: sdkmanager not found."
@@ -127,7 +142,7 @@ jobs:
             "build-tools;35.0.0"
 
       - name: Verify Environment
-        working-directory: project
+        working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
           set -euo pipefail
@@ -138,7 +153,7 @@ jobs:
           ./gradlew --version
 
       - name: Build Debug APK
-        working-directory: project
+        working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
           set -euo pipefail
@@ -154,7 +169,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: SMSIFYHUB-Android-APK
-          path: project/app/build/outputs/apk/debug/*.apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 7
 
@@ -164,7 +179,7 @@ jobs:
         with:
           name: SMSIFYHUB-Build-Error-Log
           path: |
-            project/app/build/reports/
-            project/app/build/outputs/logs/
+            **/build/reports/
+            **/build/outputs/logs/
           if-no-files-found: ignore
           retention-days: 7
