@@ -41,22 +41,36 @@ jobs:
 
           ZIP_FILE=$(find "$GITHUB_WORKSPACE" \
             -type f \
-            -iname "SMSIFYHUB_Android_Project_UPDATED.zip" \
+            -name "SMSIFYHUB_Android_Project_COMPLETED (1).zip" \
             -not -path "*/.git/*" | head -n 1 || true)
 
           if [ -z "$ZIP_FILE" ]; then
             echo "ERROR: Android project ZIP not found."
+            echo "Expected file: SMSIFYHUB_Android_Project_COMPLETED (1).zip"
             exit 1
           fi
+
+          echo "Found ZIP: $ZIP_FILE"
 
           mkdir -p "$GITHUB_WORKSPACE/project"
 
           unzip -oq "$ZIP_FILE" \
             -d "$GITHUB_WORKSPACE/project"
 
-          test -f project/gradlew
-          test -f project/settings.gradle.kts
-          test -f project/app/build.gradle.kts
+          if [ ! -f project/gradlew ]; then
+            echo "ERROR: gradlew not found in project root."
+            exit 1
+          fi
+
+          if [ ! -f project/settings.gradle.kts ]; then
+            echo "ERROR: settings.gradle.kts not found."
+            exit 1
+          fi
+
+          if [ ! -f project/app/build.gradle.kts ]; then
+            echo "ERROR: app/build.gradle.kts not found."
+            exit 1
+          fi
 
           echo "Project extracted successfully."
 
@@ -76,7 +90,7 @@ jobs:
             '/^import androidx\.compose\.material\.icons\.filled\.PhoneCall$/d' \
             "$FILE"
 
-          echo "Invalid PhoneCall import removed."
+          echo "PhoneCall import check completed."
 
       - name: Locate Android SDK Manager
         id: sdk
@@ -85,7 +99,8 @@ jobs:
           set -euo pipefail
 
           SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" \
-            -type f -name sdkmanager | head -n 1 || true)
+            -type f \
+            -name sdkmanager | head -n 1 || true)
 
           if [ -z "$SDKMANAGER" ]; then
             echo "ERROR: sdkmanager not found."
