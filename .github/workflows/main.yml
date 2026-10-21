@@ -10,17 +10,23 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: smsifyhub-android-build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: Build SMSIFYHUB APK
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      JAVA_TOOL_OPTIONS: -Xmx3g -Dfile.encoding=UTF-8
 
     steps:
-      # 1. Checkout Repository
+      # 1. Checkout repository
       - name: Checkout Repository
         uses: actions/checkout@v4
 
@@ -31,119 +37,131 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # 3. Install Utilities
+      # 3. Install unzip
       - name: Install Utilities
+        shell: bash
         run: |
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y unzip
 
-      # 4. Extract Android Project
+      # 4. Verify ZIP and extract project
       - name: Extract Android Project
         shell: bash
         run: |
           set -euo pipefail
 
-          ZIP_FILE=$(find "$GITHUB_WORKSPACE" \
-            -type f \
-            -name "SMSIFYHUB_Android_Project_COMPLETED (1).zip" \
-            -not -path "*/.git/*" | head -n 1 || true)
+          ZIP_FILE="$GITHUB_WORKSPACE/SMSIFYHUB_Android_Project_COMPLETED (1).zip"
 
-          if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: Android project ZIP not found."
+          if [ ! -f "$ZIP_FILE" ]; then
+            ZIP_FILE="$(find "$GITHUB_WORKSPACE" \
+              -type f \
+              -name 'SMSIFYHUB_Android_Project_COMPLETED (1).zip' \
+              -not -path '*/.git/*' \
+              -print -quit)"
+          fi
+
+          if [ -z "${ZIP_FILE:-}" ] || [ ! -f "$ZIP_FILE" ]; then
+            echo "::error::Project ZIP was not found."
+            echo "Repository files:"
+            find "$GITHUB_WORKSPACE" -maxdepth 3 -type f | head -150
             exit 1
           fi
 
-          echo "Found ZIP: $ZIP_FILE"
+          echo "ZIP found: $ZIP_FILE"
 
           mkdir -p "$GITHUB_WORKSPACE/extracted"
 
-          unzip -oq "$ZIP_FILE" \
-            -d "$GITHUB_WORKSPACE/extracted"
+          unzip -oq "$ZIP_FILE" -d "$GITHUB_WORKSPACE/extracted"
 
-          echo "Searching for Gradle project..."
+          echo "Extracted project files:"
+          find "$GITHUB_WORKSPACE/extracted" \
+            -maxdepth 4 \
+            -type f \
+            \( -name 'settings.gradle' \
+            -o -name 'settings.gradle.kts' \
+            -o -name 'gradlew' \
+            -o -name 'build.gradle' \
+            -o -name 'build.gradle.kts' \) \
+            -print
 
-          GRADLEW=$(find "$GITHUB_WORKSPACE/extracted" \
-            -type f -name gradlew | head -n 1 || true)
+          # Find a Gradle wrapper whose directory contains settings.gradle
+          PROJECT_DIR=""
 
-          if [ -z "$GRADLEW" ]; then
-            echo "ERROR: gradlew not found inside ZIP."
-            echo "ZIP contents:"
+          while IFS= read -r GRADLEW; do
+            CANDIDATE="$(dirname "$GRADLEW")"
+
+            if [ -f "$CANDIDATE/settings.gradle" ] || \
+               [ -f "$CANDIDATE/settings.gradle.kts" ]; then
+              PROJECT_DIR="$CANDIDATE"
+              break
+            fi
+          done < <(
             find "$GITHUB_WORKSPACE/extracted" \
-              -maxdepth 5 -type f | head -n 150
+              -type f -name gradlew -print
+          )
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "::error::Could not find gradlew and settings.gradle in the same project directory."
+            echo "ZIP file listing:"
+            find "$GITHUB_WORKSPACE/extracted" \
+              -maxdepth 6 -type f | head -200
             exit 1
           fi
 
-          PROJECT_DIR="$(dirname "$GRADLEW")"
-
-          if [ ! -f "$PROJECT_DIR/settings.gradle.kts" ] && \
-             [ ! -f "$PROJECT_DIR/settings.gradle" ]; then
-            echo "ERROR: Gradle settings file not found."
-            exit 1
-          fi
-
-          if [ ! -f "$PROJECT_DIR/app/build.gradle.kts" ] && \
-             [ ! -f "$PROJECT_DIR/app/build.gradle" ]; then
-            echo "ERROR: App Gradle build file not found."
+          if [ ! -f "$PROJECT_DIR/app/build.gradle" ] && \
+             [ ! -f "$PROJECT_DIR/app/build.gradle.kts" ]; then
+            echo "::error::app/build.gradle or app/build.gradle.kts was not found."
+            echo "Project directory: $PROJECT_DIR"
+            find "$PROJECT_DIR" -maxdepth 3 -type f | head -150
             exit 1
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Android project found: $PROJECT_DIR"
+          echo "Android project: $PROJECT_DIR"
 
-      # 5. Fix PhoneCall Import
-      - name: Fix PhoneCall Import
+      # 5. Verify Java and Android SDK
+      - name: Verify Build Environment
         shell: bash
         run: |
           set -euo pipefail
 
-          FILE="$PROJECT_DIR/app/src/main/java/com/smsifyhub/app/ui/FloatingPopupView.kt"
-
-          if [ -f "$FILE" ]; then
-            sed -i \
-              '/^import androidx\.compose\.material\.icons\.filled\.PhoneCall$/d' \
-              "$FILE"
-
-            echo "PhoneCall import check completed."
-          else
-            echo "FloatingPopupView.kt not found; skipping import fix."
-          fi
-
-      # 6. Verify Java 17
-      - name: Verify Java 17
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "JAVA_HOME=$JAVA_HOME"
-
+          echo "Java:"
           java -version
 
-          java -version 2>&1 | grep -q '"17\.' || {
-            echo "ERROR: Java 17 is required."
-            exit 1
-          }
+          echo "Java home: $JAVA_HOME"
+          echo "Android SDK: $ANDROID_HOME"
 
-      # 7. Locate Android SDK Manager
+          if [ ! -d "$ANDROID_HOME" ]; then
+            echo "::error::Android SDK directory not found."
+            exit 1
+          fi
+
+          if [ ! -d "$ANDROID_HOME/cmdline-tools" ]; then
+            echo "::error::Android SDK command-line tools not found."
+            exit 1
+          fi
+
+      # 6. Locate SDK Manager
       - name: Locate Android SDK Manager
         id: sdk
         shell: bash
         run: |
           set -euo pipefail
 
-          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" \
-            -type f -name sdkmanager | head -n 1 || true)
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" \
+            -type f -name sdkmanager -print -quit)"
 
           if [ -z "$SDKMANAGER" ]; then
-            echo "ERROR: sdkmanager not found."
+            echo "::error::sdkmanager not found."
             exit 1
           fi
 
           echo "path=$SDKMANAGER" >> "$GITHUB_OUTPUT"
+          echo "SDK Manager: $SDKMANAGER"
 
-          "$SDKMANAGER" --version
-
-      # 8. Install Android SDK Packages
+      # 7. Install SDK packages
       - name: Install Android SDK Packages
         shell: bash
         run: |
@@ -151,16 +169,15 @@ jobs:
 
           SDKMANAGER="${{ steps.sdk.outputs.path }}"
 
-          yes | "$SDKMANAGER" --licenses \
-            >/dev/null 2>&1 || true
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
 
           "$SDKMANAGER" \
             "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.0"
 
-      # 9. Verify Gradle
-      - name: Verify Gradle
+      # 8. Make Gradle wrapper executable
+      - name: Prepare Gradle
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
@@ -168,27 +185,57 @@ jobs:
 
           chmod +x gradlew
 
-          echo "Java version:"
-          java -version
-
-          echo "Gradle version:"
+          echo "Gradle wrapper:"
           ./gradlew --version
 
-      # 10. Build Debug APK
+      # 9. Build Debug APK
       - name: Build Debug APK
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
-          set -o pipefail
+          set -uo pipefail
 
+          set +e
           ./gradlew \
             --no-daemon \
+            --stacktrace \
+            --warning-mode all \
             clean \
             assembleDebug \
-            --stacktrace \
-            --info 2>&1 | tee "$GITHUB_WORKSPACE/build-error.log"
+            2>&1 | tee "$GITHUB_WORKSPACE/build-error.log"
 
-      # 11. Upload APK
+          BUILD_STATUS=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$BUILD_STATUS" -ne 0 ]; then
+            echo "::error::Gradle build failed. Check build-error.log for the actual error."
+            exit "$BUILD_STATUS"
+          fi
+
+      # 10. Verify APK
+      - name: Verify APK
+        if: success()
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK_DIR="app/build/outputs/apk/debug"
+
+          if [ ! -d "$APK_DIR" ]; then
+            echo "::error::APK output directory was not created."
+            exit 1
+          fi
+
+          find "$APK_DIR" -maxdepth 1 -type f -name '*.apk' -print
+
+          if ! find "$APK_DIR" -maxdepth 1 -type f -name '*.apk' \
+            -print -quit | grep -q .; then
+            echo "::error::No debug APK was generated."
+            exit 1
+          fi
+
+      # 11. Upload APK artifact
       - name: Upload APK
         if: success()
         uses: actions/upload-artifact@v4
@@ -198,7 +245,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      # 12. Upload Build Error Logs
+      # 12. Upload logs if build fails
       - name: Upload Build Error Logs
         if: failure()
         uses: actions/upload-artifact@v4
